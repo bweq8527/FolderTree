@@ -2,165 +2,139 @@ import os
 from pathlib import Path
 
 
-def recreate_structure_from_marked_tree(tree_file_path_input, base_target_dir_input, generate_files_flag):
+def remove_comments(line):
     """
-    基于带有 '/' 标记的 Tree.txt 还原架构。
-    根据 generate_files_flag 决定是否生成空文件。
+    剔除各种常见的注释格式。
+    支持格式: #, //, --, 注：, (注:
     """
+    # 定义可能的注释起始符
+    comment_markers = [' #', ' //', ' --', ' #', '//', '--', '注：', '(注:']
+
+    content = line
+    for marker in comment_markers:
+        if marker in content:
+            # 只取标记之前的内容
+            content = content.split(marker)[0]
+
+    return content.rstrip()
+
+
+def recreate_structure_ultimate(tree_file_path_input, base_target_dir_input, gen_files, clean_comments):
     print("\n" + "=" * 50)
-    print("--- 目录架构反向生成脚本 (最终版) ---")
-    print(f"📄 模式: {'包含空文件' if generate_files_flag else '仅生成文件夹'}")
+    print("--- 目录架构反向生成脚本 (究极兼容版) ---")
+    print(f"📄 文件模式: {'包含空文件' if gen_files else '仅文件夹'}")
+    print(f"✂️ 剔除注释: {'开启' if clean_comments else '关闭'}")
     print("=" * 50)
 
-    # --- 1. 路径清理与准备 ---
+    # --- 1. 路径准备 ---
     try:
         tree_file_path = Path(tree_file_path_input.replace('"', '').replace("'", "")).resolve()
         base_target_dir = Path(base_target_dir_input.replace('"', '').replace("'", "")).resolve()
-    except Exception as e:
-        print(f"❌ 路径格式错误: {e}")
-        return
 
-    if not tree_file_path.exists():
-        print(f"❌ 找不到 Tree 文件: {tree_file_path}")
-        return
-
-    try:
-        base_target_dir.mkdir(parents=True, exist_ok=True)
-    except Exception as e:
-        print(f"❌ 无法创建基准目录: {e}")
-        return
-
-    # --- 2. 读取文件 ---
-    try:
         with open(tree_file_path, 'r', encoding='utf-8') as f:
             lines = f.readlines()
     except Exception as e:
-        print(f"❌ 读取文件失败: {e}")
+        print(f"❌ 准备阶段出错: {e}")
         return
 
-    # --- 3. 解析与生成 ---
+    # --- 2. 根目录识别 ---
     root_name = None
-    structure_lines = []
-    parsing_started = False
+    start_index = 0
 
-    # A. 提取根目录和树状图行
-    for line in lines:
-        line_clean = line.strip()
-        if not line_clean:
-            continue
+    for i, line in enumerate(lines):
+        # 如果开启了剔除注释，则预处理
+        processed_line = remove_comments(line) if clean_comments else line
+        clean = processed_line.strip()
 
-        # 提取根目录名
-        if '根目录:' in line_clean and not root_name:
-            parts = line_clean.split('根目录:', 1)
-            if len(parts) > 1:
-                root_name = parts[-1].strip()
-                print(f"✅ 识别到根目录: {root_name}")
-            continue
+        if not clean: continue
 
-        # 遇到分隔线或日志区停止
-        if parsing_started and (
-                line_clean.startswith('---') or line_clean.startswith('=' * 10) or "开始执行平铺式" in line_clean):
+        # 兼容“根目录:”标签或直接第一行
+        if '根目录:' in clean:
+            root_name = clean.split('根目录:', 1)[-1].strip()
+            start_index = i + 1
+            break
+        elif '├──' not in clean and '└──' not in clean and '│' not in clean:
+            root_name = clean.rstrip('/')
+            start_index = i + 1
             break
 
-        # 收集树状图行
-        if '├──' in line or '└──' in line:
-            parsing_started = True
-            structure_lines.append(line)
-
     if not root_name:
-        print("❌ 错误: 无法解析根目录名称，请检查 Tree.txt 格式。")
+        print("❌ 无法识别根目录。")
         return
 
-    # 创建顶层根目录
     top_level_dir = base_target_dir / root_name
     top_level_dir.mkdir(parents=True, exist_ok=True)
     print(f"📂 创建根文件夹: {top_level_dir}")
 
-    # B. 遍历并创建
-    path_stack = {}  # Key: Level, Value: Folder Name
-    folder_count = 0
-    file_count = 0
+    # --- 3. 核心解析循环 ---
+    path_stack = {}
+    f_count, d_count = 0, 0
 
-    for line in structure_lines:
-        line_original = line.rstrip('\r\n')
+    for line in lines[start_index:]:
+        # 处理注释
+        working_line = remove_comments(line) if clean_comments else line.rstrip()
 
-        # 1. 计算层级
+        # 跳过空行和装饰线
+        if not working_line.strip() or working_line.strip().startswith(('---', '===')):
+            continue
+
+        # 寻找树状图标记
         marker_pos = -1
-        if '├──' in line_original:
-            marker_pos = line_original.find('├──')
-        elif '└──' in line_original:
-            marker_pos = line_original.find('└──')
+        for m in ['├──', '└──']:
+            if m in working_line:
+                marker_pos = working_line.find(m)
+                marker_type = m
+                break
 
-        if marker_pos == -1: continue
+        if marker_pos == -1: continue  # 不是有效的架构行
 
+        # 提取层级
         level = (marker_pos // 4) + 1
 
-        # 2. 提取名称并判断类型
-        raw_name = line_original[marker_pos:].replace('├── ', '').replace('└── ', '').strip()
-
+        # 提取纯名称
+        raw_name = working_line[marker_pos:].replace('├── ', '').replace('└── ', '').strip()
         if not raw_name: continue
 
-        # 【核心逻辑】：根据 '/' 判断
-        is_directory = raw_name.endswith('/')
+        # 判定类型
+        is_dir = raw_name.endswith('/')
+        clean_name = raw_name.rstrip('/')
 
-        # 去掉最后的 '/' 用于路径构建
-        clean_name = raw_name[:-1] if is_directory else raw_name
-
-        # 3. 构建路径 (从 stack 中获取父级)
-        parents_path = Path(".")
+        # 构建路径
+        parents = Path(".")
         for i in range(1, level):
             if i in path_stack:
-                parents_path = parents_path / path_stack[i]
+                parents = parents / path_stack[i]
 
-        full_target_path = top_level_dir / parents_path / clean_name
+        target_path = top_level_dir / parents / clean_name
 
-        # 4. 执行创建操作
-        if is_directory:
-            # --- 处理文件夹 ---
-            path_stack[level] = clean_name  # 入栈
-            if not full_target_path.exists():
-                full_target_path.mkdir(parents=True, exist_ok=True)
-                folder_count += 1
+        if is_dir:
+            path_stack[level] = clean_name
+            if not target_path.exists():
+                target_path.mkdir(parents=True, exist_ok=True)
+                d_count += 1
         else:
-            # --- 处理文件 ---
-            # 只有当用户选择了 "Y" (generate_files_flag 为 True) 时才执行
-            if generate_files_flag:
-                if not full_target_path.exists():
-                    full_target_path.parent.mkdir(parents=True, exist_ok=True)  # 确保父目录存在
-                    full_target_path.touch()  # 创建空文件
-                    file_count += 1
+            if gen_files:
+                if not target_path.exists():
+                    target_path.parent.mkdir(parents=True, exist_ok=True)
+                    target_path.touch()
+                    f_count += 1
 
     print("-" * 50)
-    print(f"🎉 重建完成!")
-    print(f"📂 新建文件夹: {folder_count}")
-    if generate_files_flag:
-        print(f"📄 新建空文件: {file_count}")
-    else:
-        print(f"📄 新建空文件: 0 (用户选择跳过)")
-    print(f"📍 存放位置: {top_level_dir.resolve()}")
+    print(f"✨ 任务完成！\n新建文件夹: {d_count}\n新建空文件: {f_count}\n位置: {top_level_dir}")
     print("=" * 50)
 
 
 if __name__ == "__main__":
-    # 1. 获取 Tree 文件路径
-    t_path = input("请输入带 '/' 标记的 Tree.txt 路径: ").strip()
+    t_path = input("请输入 Tree.txt 路径: ").strip()
+    b_dir = input("请输入目标存放目录: ").strip()
 
-    if t_path:
-        # 2. 获取目标路径
-        b_dir = input("请输入目标基准目录: ").strip()
+    if t_path and b_dir:
+        # 功能 1: 文件创建开关
+        choice_f = input("是否生成空文件占位符？(Y/N): ").strip().upper()
+        gen_files = (choice_f == 'Y')
 
-        if b_dir:
-            # 3. 获取模式选项 (新增功能)
-            while True:
-                choice = input("是否生成空文件占位符？(Y: 生成 / N: 仅生成文件夹): ").strip().upper()
-                if choice in ['Y', 'N']:
-                    generate_files = (choice == 'Y')
-                    break
-                print("输入无效，请输入 Y 或 N。")
+        # 功能 2: 注释剔除开关 (新增)
+        choice_c = input("是否尝试【剔除】行尾注释？(Y: 仅保留文件名 / N: 保持原样): ").strip().upper()
+        clean_comments = (choice_c == 'Y')
 
-            # 4. 执行
-            recreate_structure_from_marked_tree(t_path, b_dir, generate_files)
-        else:
-            print("❌ 目标目录不能为空")
-    else:
-        print("❌ Tree 文件路径不能为空")
+        recreate_structure_ultimate(t_path, b_dir, gen_files, clean_comments)
